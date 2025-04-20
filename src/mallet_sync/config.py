@@ -8,64 +8,31 @@ import numpy as np
 from numpy.typing import DTypeLike
 
 
-@dataclass
-class AudioConfig:
-    """Configuration for audio recording settings."""
-    sample_rate: int = 16000
-    dtype: DTypeLike = "int16"
-    channels: int = 9
-    chunk_size: int = 1024
-    recordings_dir: Path = field(default_factory=lambda: Path("recordings"))
-
-    def __post_init__(self):
-        """Ensure recordings directory exists."""
-        self.recordings_dir.mkdir(exist_ok=True)
-
-
-@dataclass
+@dataclass(frozen=True)
 class DeviceConfig:
-    """Configuration for a single audio device."""
-    name: str
+    """Configuration for an audio recording device"""
     device_id: int
-    channels: int
-    sample_rate: int
+    name: str
+    channels: int = 9
+    sample_rate: int = 16000
+    chunk_size: int = 1024
+    dtype: DTypeLike = "int16"
 
     def __str__(self) -> str:
         return f"{self.name} (ID: {self.device_id}, Channels: {self.channels})"
 
 
-@dataclass
+@dataclass(frozen=True)
 class RecordingSession:
-    """Configuration for a recording session."""
-    duration: float
-    devices: dict[int, DeviceConfig]
-    output_format: str = 'WAV'
-    subtype: str = 'PCM_16'
-    timestamp_format: str = "%Y%m%d_%H%M%S"
+    """Configuration for a recording session"""
+    devices: list[DeviceConfig]
+    base_path: Path = field(default_factory=lambda: Path("recordings"))
+    output_format: str = "WAV"
+    subtype: str = "PCM_16"
+    timestamp_format: str = "%H_%M_%S_%Y%m%d"  # 14_30_45_20240115
 
-    def get_filename(self, device_id: int, channel: int | None = None) -> Path:
-        """
-        Generate filename path for recording based on device and channel.
-
-        Args:
-            device_id: ID of the recording device
-            channel: Optional channel number for multi-channel recordings
-
-        Returns:
-            Path object for the recording file
-        """
-        from datetime import datetime
-
-        if device_id not in self.devices:
-            raise ValueError(f"Device ID {device_id} not found in recording session")
-
-        device = self.devices[device_id]
-        timestamp = datetime.now().strftime(self.timestamp_format)
-        ext = self.output_format.lower()
-
-        if channel is not None:
-            filename = f"{device.name}_ch{channel}_{timestamp}.{ext}"
-        else:
-            filename = f"{device.name}_{timestamp}.{ext}"
-
-        return Path(filename)
+    def __post_init__(self):
+        """Convert base_path to Path if string provided"""
+        if isinstance(self.base_path, str):
+            object.__setattr__(self, 'base_path', Path(self.base_path))
+        self.base_path.mkdir(exist_ok=True)
