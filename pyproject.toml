@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mallet-sync"
+version = "0.1.0"
+description = "Record audio from multiple mallet devices"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.2.5",
+    "sounddevice>=0.5.1",
+    "standard-logger",
+]
+
+[tool.uv.sources]
+standard-logger = { path = "wheels/standard_logger-0.1.1-py3-none-any.whl" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mallet_sync"]
