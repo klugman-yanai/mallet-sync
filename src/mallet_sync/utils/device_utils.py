@@ -2,15 +2,52 @@
 Device detection and configuration utilities for mallet-sync.
 """
 
+from pathlib import Path
 from typing import Any
 
 import sounddevice as sd
 
 from rapidfuzz.fuzz import partial_ratio
 
+from mallet_sync.audio import SoundDeviceStreamRecorder
 from mallet_sync.config import DeviceConfig, DeviceInfo, get_logger
+from mallet_sync.utils.file_utils import get_recording_path
 
 logger = get_logger(__name__)
+
+
+def detect_devices() -> list[DeviceConfig]:
+    """Detect mallet devices and return a list of device configs.
+
+    Returns the first two devices found, prioritizing main and wired roles.
+    """
+    mallet_1, mallet_2 = get_mallet_devices(display=True)
+    return [mallet_1, mallet_2]
+
+
+def create_recorders(
+    devices: list[DeviceConfig],
+    output_dir: Path,
+    recording_context: str = 'ambient',
+) -> list[SoundDeviceStreamRecorder]:
+    """Create recorder instances for all devices for a specific recording context.
+
+    Args:
+        devices: List of device configurations
+        output_dir: Directory to save recordings
+        recording_context: Context name for recordings (e.g., 'ambient', 'zone_1')
+
+    Returns:
+        List of recorder instances, one per device
+    """
+    return [
+        SoundDeviceStreamRecorder.from_device_config(
+            dev,
+            output_file=get_recording_path(dev, output_dir, recording_context),
+        )
+        for dev in devices
+    ]
+
 
 TARGET_KEYWORDS: tuple[str, ...] = ('kardome', 'mallet', 'kt')
 
@@ -86,9 +123,7 @@ def find_devices_by_keyword(
             break
 
     if len(matches) < max_devices:
-        error_message = (
-            f'Found only {len(matches)} devices, but {max_devices} are required.'
-        )
+        error_message = f'Found only {len(matches)} devices, but {max_devices} are required.'
         logger.error(error_message)
         raise RuntimeError(error_message)
 
