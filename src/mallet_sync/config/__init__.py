@@ -1,20 +1,29 @@
 from .config import (
-    DEFAULT_FILENAME_TEMPLATE,
-    DEFAULT_INPUT_DIR,
-    DEFAULT_OUTPUT_DIR,
-    DeviceConfig,
+    FILENAME_TEMPLATE,
+    INPUT_AUDIO_DIR,
+    MAIN_MALLET_INDEX,
+    MALLET_CHANNELS,
+    MALLET_DTYPE,
+    MALLET_KEYWORDS,
+    MALLET_SAMPLE_RATE,
+    OUTPUT_BASE_DIR,
+    RECORDER_CHUNK_SIZE,
+    WIRED_MALLET_INDEX,
     DeviceInfo,
-    RecordingSession,
+    get_logger,
 )
 
 __all__ = [
-    'DEFAULT_FILENAME_TEMPLATE',
-    'DEFAULT_INPUT_DIR',
-    'DEFAULT_OUTPUT_DIR',
-    'DeviceConfig',
-    'RecordingSession',
+    'FILENAME_TEMPLATE',
+    'INPUT_AUDIO_DIR',
+    'MAIN_MALLET_INDEX',
+    'MALLET_CHANNELS',
+    'MALLET_DTYPE',
+    'MALLET_KEYWORDS',
+    'MALLET_SAMPLE_RATE',
+    'OUTPUT_BASE_DIR',
+    'RECORDER_CHUNK_SIZE',
+    'WIRED_MALLET_INDEX',
+    'DeviceInfo',
+    'get_logger',
 ]
-
-from .logger import get_logger
-
-logger = get_logger(__name__)

@@ -1,128 +1,102 @@
-from __future__ import annotations
-
+# audio/recorder.py
 import threading
+import time
 
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
-from mallet_sync.config import DeviceConfig
+# Use absolute imports
+from mallet_sync.config import get_logger
+
+logger = get_logger(__name__)
 
 
-class SoundDeviceStreamRecorder:
-    """
-    Records audio from a specified device to a WAV file.
-    Threading is an implementation detail: start() launches background recording,
-    stop() signals termination, join() waits for completion. Synchronous record() is also provided.
-
-    Args:
-        device_index: int - Index of the audio input device.
-        channels: int - Number of channels to record.
-        sample_rate: int - Sample rate in Hz.
-        chunk_size: int - Frames per buffer.
-        output_file: Path - Path to the WAV file to write.
-        dtype: str - Numpy dtype string (default: 'int16').
-        duration: float | None - Maximum duration to record (seconds). If None, records until stopped.
-    """
+class AudioRecorder:
+    """Records audio from a specified device to a WAV file using a thread."""
 
     def __init__(
         self,
-        *,
         device_index: int,
         channels: int,
         sample_rate: int,
         chunk_size: int,
         output_file: Path,
-        dtype: str = 'int16',
-        duration: float | None = None,
-    ) -> None:
-        """
-        Initialize from explicit parameters. Prefer using from_device_config for clarity.
-        """
-        self.device_index: int = device_index
-        self.channels: int = channels
-        self.sample_rate: int = sample_rate
-        self.chunk_size: int = chunk_size
-        self.output_file: Path = output_file
-        self.dtype: str = dtype
-        self.duration: float | None = duration
-        self._stop_event: threading.Event = threading.Event()
+        dtype: str,
+    ):
+        self.device_index = device_index
+        self.channels = channels
+        self.sample_rate = sample_rate
+        self.chunk_size = chunk_size
+        self.output_file = output_file
+        self.dtype = dtype
+
+        self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._exception: Exception | None = None
-        self._is_recording: bool = False
-
-    @classmethod
-    def from_device_config(
-        cls,
-        device_config: DeviceConfig,
-        output_file: Path,
-        *,
-        dtype: str = 'int16',
-        duration: float | None = None,
-    ) -> SoundDeviceStreamRecorder:
-        """
-        Construct a recorder from a DeviceConfig instance.
-        """
-        return cls(
-            device_index=device_config.index,
-            channels=device_config.max_input_channels,
-            sample_rate=device_config.sample_rate,
-            chunk_size=device_config.chunk_size,
-            output_file=output_file,
-            dtype=dtype,
-            duration=duration,
-        )
-
-    def start(self) -> None:
-        if self._is_recording:
-            raise RuntimeError('Recording already in progress.')
-        self._stop_event.clear()
-        self._exception = None
-        self._thread = threading.Thread(target=self._record, daemon=True)
-        self._is_recording = True
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join()
+        self._frames: list[np.ndarray] = []
         self._is_recording = False
-        if self._exception:
-            raise self._exception
 
-    def join(self) -> None:
-        if self._thread is not None:
-            self._thread.join()
-        if self._exception:
-            raise self._exception
-
+    @property
     def is_recording(self) -> bool:
+        """Checks if the recorder thread is active."""
         return self._is_recording and self._thread is not None and self._thread.is_alive()
 
-    def record(self) -> None:
-        """
-        Synchronous (blocking) recording. Returns when finished or stopped.
-        """
+    def start(self):
+        """Starts the recording thread."""
+        if self.is_recording:
+            # Use logger.error or raise specific exception
+            logger.error(f'Recording already in progress for {self.output_file.name}.')
+            raise RuntimeError(f'Recording already in progress for {self.output_file.name}.')
+
         self._stop_event.clear()
         self._exception = None
-        self._is_recording = True
-        try:
-            self._record()
-        finally:
-            self._is_recording = False
-        if self._exception:
-            raise self._exception
-
-    def _record(self) -> None:
-        frames: list[np.ndarray] = []
-        total_frames: int = 0
-        max_frames: int | None = (
-            int(self.sample_rate * self.duration) if self.duration is not None else None
+        self._frames = []
+        self._is_recording = True  # Set state before starting thread
+        self._thread = threading.Thread(
+            target=self._record_loop,
+            daemon=True,
+            name=f'Rec-{self.output_file.stem}',
         )
+        self._thread.start()
+        logger.info(f'Started recording device {self.device_index} -> {self.output_file.name}')
+
+    def stop(self):
+        """Signals the recording thread to stop, joins it, and writes the file."""
+        if not self._is_recording or self._thread is None:
+            logger.debug(f'Stop called but not recording: {self.output_file.name}')
+            return
+
+        logger.debug(f'Signaling stop for recorder: {self.output_file.name}')
+        self._stop_event.set()
+
+        logger.debug(f'Joining recorder thread: {self.output_file.name}')
+        self._thread.join(timeout=3.0)  # Increased timeout slightly
+
+        if self._thread.is_alive():
+            logger.warning(f'Recorder thread for device {self.device_index} did not stop gracefully.')
+            # Decide policy: should we attempt write anyway? For now, yes.
+
+        self._is_recording = False
+        logger.info(f'Stopped recording device {self.device_index}.')
+        self._thread = None
+
+        # Log exception if one occurred in the thread
+        if self._exception:
+            logger.error(f'Exception during recording for {self.output_file.name}: {self._exception}')
+            # Optionally re-raise if needed: raise self._exception
+
+        # Write the file after stopping and logging potential errors
+        self._write_file()
+
+    def _record_loop(self):
+        """The main loop executed by the recording thread."""
         try:
+            # Ensure parent directory exists before opening stream
+            self.output_file.parent.mkdir(parents=True, exist_ok=True)
+
             with sd.InputStream(
                 device=self.device_index,
                 channels=self.channels,
@@ -130,57 +104,51 @@ class SoundDeviceStreamRecorder:
                 blocksize=self.chunk_size,
                 dtype=self.dtype,
             ) as stream:
+                logger.debug(f'Input stream opened for device {self.device_index}')
                 while not self._stop_event.is_set():
-                    data = stream.read(self.chunk_size)[0]
-                    frames.append(data.copy())
-                    total_frames += len(data)
-                    if max_frames is not None and total_frames >= max_frames:
-                        break
-            self._write_audio(frames)
+                    data, overflowed = stream.read(self.chunk_size)
+                    if overflowed:
+                        logger.warning(f'Input overflowed on device {self.device_index}')
+                    if data.size > 0:
+                        self._frames.append(data.copy())
+                    else:
+                        # stream.read blocks, so this sleep is likely redundant
+                        # but harmless as a fallback.
+                        time.sleep(0.001)
+
+        except sd.PortAudioError as pae:
+            logger.exception(f'PortAudioError recording device {self.device_index}')
+            self._exception = pae
         except Exception as exc:
+            # Use logger.exception to include traceback
+            logger.exception(f'Error during recording loop for device {self.device_index}')
             self._exception = exc
-            raise
+        finally:
+            logger.debug(f'Recording loop finished for device {self.device_index}')
 
-    def _write_audio(self, frames: list[np.ndarray]) -> None:
-        """
-        Write recorded frames to an audio file using soundfile (modern, robust).
-        Supports WAV, FLAC, OGG, etc. based on file extension.
-        """
-        if not frames:
-            raise RuntimeError('No audio frames recorded.')
-        arr = np.concatenate(frames, axis=0)
-        sf.write(
-            file=str(self.output_file),
-            data=arr,
-            samplerate=self.sample_rate,
-            subtype=None,  # auto-select
-            format=None,  # auto from extension
-        )
+    def _write_file(self):
+        """Writes the collected audio frames to the output WAV file."""
+        if not self._frames:
+            logger.warning(f'No frames recorded for {self.output_file.name}. Skipping file write.')
+            return
+        try:
+            duration_s = (
+                len(self._frames) * self.chunk_size / self.sample_rate if self.sample_rate > 0 else 0
+            )
+            logger.info(
+                f'Writing {len(self._frames)} chunks ({duration_s:.2f}s) to {self.output_file.name}',
+            )
 
-    @staticmethod
-    def record_audio(
-        *,
-        device_index: int,
-        channels: int,
-        sample_rate: int,
-        chunk_size: int,
-        output_file: Path,
-        dtype: str = 'int16',
-        duration: float | None = None,
-    ) -> None:
-        """
-        Convenience static method to record audio synchronously.
-        """
-        recorder = SoundDeviceStreamRecorder(
-            device_index=device_index,
-            channels=channels,
-            sample_rate=sample_rate,
-            chunk_size=chunk_size,
-            output_file=output_file,
-            dtype=dtype,
-            duration=duration,
-        )
-        recorder.start()
-        recorder.join()
-        if recorder._exception:
-            raise recorder._exception
+            arr = np.concatenate(self._frames, axis=0)
+            sf.write(
+                file=str(self.output_file),
+                data=arr,
+                samplerate=self.sample_rate,
+                subtype=None,  # Auto from dtype
+                format='WAV',
+            )
+            logger.info(f'Successfully wrote {self.output_file.name}')
+        except Exception:
+            logger.exception(f'Failed to write audio file {self.output_file.name}')
+            # Maybe store this exception as well?
+            # self._exception = self._exception or e # Keep first exception

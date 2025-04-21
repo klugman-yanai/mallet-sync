@@ -1,52 +1,50 @@
-"""mallet_sync
+# main.py
+import sys
+import time
 
-Main module for mallet-sync audio recording system. This provides the entry point
-for running the application with a clean, orchestration-focused structure.
+# Use absolute imports
+from mallet_sync.audio.core import play_and_record_cycle
+from mallet_sync.config.config import INPUT_AUDIO_DIR, OUTPUT_BASE_DIR, get_logger
+from mallet_sync.utils.device_utils import find_mallet_devices
+from mallet_sync.utils.file_utils import create_output_dir, scan_audio_files
 
-Assumptions:
-- Python 3.13+ is required
-- Custom logger is used
-- Audio I/O will use sounddevice (not pyaudio)
-"""
-
-from mallet_sync.config import get_logger
-from mallet_sync.config.config import build_session
-from mallet_sync.utils.audio_utils import record_ambient_noise, record_tests, record_zones
-from mallet_sync.utils.device_utils import create_recorders, detect_devices
-from mallet_sync.utils.file_utils import save_session_safely, setup_output_dir
-
-logger = get_logger(__name__)
+logger = get_logger(__name__)  # Get logger for main module
 
 
-def main() -> None:
-    """Run the main recording workflow for mallet synchronization.
+def main():
+    """Main entry point for the mallet-sync recording script."""
+    logger.info('Starting Mallet Sync Recorder (using default output)...')
 
-    This function orchestrates the recording process but delegates all implementation
-    details to specialized utility modules. It follows a clean, linear workflow:
-    1. Setup recording environment and devices
-    2. Record ambient noise, zone calibrations, and test files
-    3. Save comprehensive session metadata
+    # 1. Find Mallet Devices
+    selected_mallets = find_mallet_devices()
+    if not selected_mallets:
+        logger.critical('Could not select exactly two required Mallet devices. Exiting.')
+        sys.exit(1)
 
-    Error handling is implemented within each specialized function, keeping this
-    main workflow clean and focused on orchestration rather than implementation.
-    """
-    # Setup phase
-    output_dir = setup_output_dir()
-    devices = detect_devices()
-    recorders = create_recorders(devices, output_dir)
-    session = build_session(devices, recorders, output_dir)
+    # 2. Scan for Audio Files
+    files_to_process = scan_audio_files(INPUT_AUDIO_DIR)
+    if not files_to_process:
+        logger.warning(f'No input audio files found in {INPUT_AUDIO_DIR}. Nothing to process.')
+        sys.exit(0)
 
-    # Execute recordings in sequence with built-in error handling
-    # The auto-detection of ambient_noise.wav happens within the function
-    record_ambient_noise(session)
-    record_zones(session)
-    record_tests(session)
+    # 3. Create Output Directory
+    try:
+        output_dir = create_output_dir(OUTPUT_BASE_DIR)
+    except Exception:
+        logger.critical('Failed to prepare output directory. Exiting.')
+        sys.exit(1)
 
-    # Finalization phase - always attempt to save metadata
-    save_session_safely(output_dir, session)
+    # 4. Run Recording Cycles
+    logger.info(f'Processing {len(files_to_process)} audio files...')
+    start_time = time.time()
+    for wav_file in files_to_process:
+        play_and_record_cycle(selected_mallets, wav_file, output_dir)
+        # Add a small pause between cycles if desired
+        time.sleep(0.5)
 
-
-# ---- Main Entry Point --------------------------------------------------------
+    end_time = time.time()
+    logger.info(f'All processing finished in {end_time - start_time:.2f} seconds.')
+    logger.info(f'Recordings saved in: {output_dir.resolve()}')
 
 
 if __name__ == '__main__':
