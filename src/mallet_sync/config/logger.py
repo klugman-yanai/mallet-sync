@@ -23,4 +23,6 @@ def get_logger(name: str) -> StandardLogger:
     return cast(StandardLogger, logging.getLogger(name))
 
 
+logger = get_logger(__name__)
+
 setup_logging(log_config)

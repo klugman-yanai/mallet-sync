@@ -21,3 +21,8 @@ standard-logger = { path = "wheels/standard_logger-0.1.1-py3-none-any.whl" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mallet_sync"]
+
+[dependency-groups]
+dev = [
+    "uv>=0.6.14",
+]

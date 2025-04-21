@@ -284,8 +284,8 @@ def record_with_progress(
     session: RecordingSession,
     wav_path: Path | None = None,
     duration: float = DEFAULT_RECORDING_DURATION,
-    description: str = 'Recording: audio',
-    context_name: str | None = None,
+    description: str = 'Recording',
+    context_name: str = '',
 ) -> float:
     """
     Record audio with progress tracking.
@@ -394,7 +394,7 @@ def record_ambient_noise(
         # Update description if using a WAV file
         if wav_path is not None and wav_path.exists():
             wav_filename = Path(wav_path).name
-            description = f'Recording: ambient noise [{wav_filename}]'
+            description = f'Recording ambient noise with {wav_filename}'
 
             # Track the input file in session metadata
             input_files = session.input_files.copy()
@@ -467,8 +467,7 @@ def _record_for_context_files(
             object.__setattr__(session, 'input_files', input_files)
 
         # Record using this specialized session with progress tracking
-        wav_filename = Path(file_path).name
-        description = f'Recording: {context_name} [{wav_filename}]'
+        description = f'Recording {context_name}'
         actual_duration = record_with_progress(
             session=context_session,
             wav_path=file_path,
