@@ -1,4 +1,7 @@
 # src/logger.py
+
+"""A custom logger. Functional, but still in development, not all features are implemented."""
+
 import logging
 
 from typing import cast
@@ -6,8 +9,8 @@ from typing import cast
 from standard_logger import LoggerConfig, StandardLogger, setup_logging
 
 log_config = LoggerConfig(
-    app_name="Multiple Mallet Recorder",
-    app_author="Kardome",
+    app_name='Multiple Mallet Recorder',
+    app_author='Kardome',
     log_file_path=False,
 )
 
