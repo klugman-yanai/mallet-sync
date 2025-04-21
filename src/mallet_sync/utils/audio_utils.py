@@ -12,6 +12,8 @@ from typing import Any
 import sounddevice as sd
 import soundfile as sf
 
+from rich.progress import TaskID
+
 from mallet_sync.audio import SoundDeviceAudioPlayer, SoundDeviceStreamRecorder
 from mallet_sync.config import DEFAULT_INPUT_DIR, DeviceConfig, RecordingSession, get_logger
 from mallet_sync.utils.file_utils import get_recording_path
@@ -119,7 +121,8 @@ def scan_input_file_directory() -> dict[str, Path]:
 
 
 def create_all_recorders(
-    devices: list[DeviceConfig], output_dir: Path,
+    devices: list[DeviceConfig],
+    output_dir: Path,
 ) -> dict[str, list[SoundDeviceStreamRecorder]]:
     """
     Create recorders for all devices and all recording contexts.
@@ -144,6 +147,118 @@ def create_all_recorders(
     return recorders_by_context
 
 
+def record_with_progress(
+    session: RecordingSession,
+    wav_path: str | Path | None = None,
+    duration: float = 7.0,
+    description: str = 'Recording',
+    context_name: str = '',
+) -> None:
+    """
+    Record audio with progress tracking.
+
+    Args:
+        session: The recording session with devices and recorders
+        wav_path: Optional path to WAV file to play while recording
+        duration: Duration to record if no WAV file is provided
+        description: User-friendly description for the progress bar
+        context_name: Recording context name for logging
+    """
+    if wav_path is not None:
+        # Record while playing a WAV file
+        info = sf.info(str(wav_path))
+        actual_duration: float = info.duration
+        total_steps = 100  # Use fixed 100 steps for percentage-based progress
+        wav_filename = Path(wav_path).name
+        logger.info(f'Recording {context_name} with {wav_filename} (duration: {actual_duration:.2f}s)')
+
+        # Create progress tracking with StandardLogger using file_progress mode
+        with logger.progress(description=description, file_progress=True) as progress:
+            # Create a task with fixed total steps
+            task_id = progress.add_task(description, total=total_steps)
+
+            # Start all recorders
+            for recorder in session.recorders:
+                recorder.start()
+
+            # Play WAV with non-blocking method so we can update progress
+            player = SoundDeviceAudioPlayer(str(wav_path))
+            player.start()
+
+            # Update progress while playing
+            start_time = time.time()
+            last_percent = -1
+
+            # Keep updating until playback finishes
+            while player._is_playing:
+                # Calculate progress percentage (0-100)
+                elapsed = time.time() - start_time
+                percent = min(99, int(99 * elapsed / actual_duration))
+
+                # Only advance if percentage has increased
+                if percent > last_percent:
+                    # How many steps to advance
+                    steps_to_advance = percent - last_percent
+                    if steps_to_advance > 0:
+                        progress.update(TaskID(task_id), advance=steps_to_advance)
+                        last_percent = percent
+
+                time.sleep(0.05)
+
+            # Final update to ensure 100% completion
+            remaining_steps = total_steps - last_percent - 1
+            if remaining_steps > 0:
+                progress.update(TaskID(task_id), advance=remaining_steps)
+
+            # Stop all recorders when playback finishes
+            for recorder in session.recorders:
+                recorder.stop()
+    else:
+        # Record silence for the specified duration
+        logger.info(f'Recording {context_name} for {duration:.2f}s')
+
+        # Create progress tracking with StandardLogger
+        with logger.progress(description=description, file_progress=True) as progress:
+            # Use 100 steps for percentage-based progress
+            total_steps = 100
+            task_id = progress.add_task(description, total=total_steps)
+
+            # Start all recorders
+            for recorder in session.recorders:
+                recorder.start()
+
+            # Update progress continuously during recording
+            start_time = time.time()
+            last_percent = -1
+
+            # Keep updating until duration completes
+            while time.time() - start_time < duration:
+                # Calculate progress percentage (0-100)
+                elapsed = time.time() - start_time
+                percent = min(99, int(99 * elapsed / duration))
+
+                # Only advance if percentage has increased
+                if percent > last_percent:
+                    # How many steps to advance
+                    steps_to_advance = percent - last_percent
+                    if steps_to_advance > 0:
+                        progress.update(TaskID(task_id), advance=steps_to_advance)
+                        last_percent = percent
+
+                time.sleep(0.05)
+
+            # Final update to ensure 100% completion
+            remaining_steps = total_steps - last_percent - 1
+            if remaining_steps > 0:
+                progress.update(TaskID(task_id), advance=remaining_steps)
+
+            # Stop all recorders
+            for recorder in session.recorders:
+                recorder.stop()
+
+    logger.info(f'Finished recording {context_name or "audio"}.')
+
+
 def record_ambient_noise(
     session: RecordingSession,
     wav_path: str | Path | None = None,
@@ -152,28 +267,20 @@ def record_ambient_noise(
     """
     Record ambient noise for the session. If wav_path is provided, record while playing the WAV file
     (duration is determined automatically). If wav_path is None, record silence for the specified duration.
+    Displays a progress bar during recording.
     """
+    description = 'Recording ambient noise'
     if wav_path is not None:
-        player = SoundDeviceAudioPlayer(str(wav_path))
-        for recorder in session.recorders:
-            recorder.start()
-        player.play()  # This is synchronous, will block until done
-        for recorder in session.recorders:
-            recorder.stop()
-    else:
-        logger.info(f'Recording ambient noise (silence) for {duration:.2f}s')
-        _record_ambient(session, lambda: time.sleep(duration), duration)
+        wav_filename = Path(wav_path).name
+        description = f'Recording ambient noise with {wav_filename}'
 
-    logger.info('Finished recording ambient noise.')
-
-
-def _record_ambient(session: RecordingSession, action: Callable, duration: float) -> None:
-    """Helper to start/stop all recorders around a synchronous action."""
-    for recorder in session.recorders:
-        recorder.start()
-    action()
-    for recorder in session.recorders:
-        recorder.stop()
+    record_with_progress(
+        session=session,
+        wav_path=wav_path,
+        duration=duration,
+        description=description,
+        context_name='ambient noise',
+    )
 
 
 def record_zones(session: RecordingSession) -> None:
@@ -207,8 +314,14 @@ def record_zones(session: RecordingSession) -> None:
             output_dir=session.output_dir,
         )
 
-        # Record using this specialized session
-        record_ambient_noise(zone_session, wav_path=zone_file)
+        # Record using this specialized session with progress tracking
+        description = f'Recording {zone_name} calibration'
+        record_with_progress(
+            session=zone_session,
+            wav_path=zone_file,
+            description=description,
+            context_name=zone_name,
+        )
 
     logger.info(f'Completed recording {len(zone_files)} zone calibrations')
 
@@ -244,7 +357,13 @@ def record_tests(session: RecordingSession) -> None:
             output_dir=session.output_dir,
         )
 
-        # Record using this specialized session
-        record_ambient_noise(test_session, wav_path=test_file)
+        # Record using this specialized session with progress tracking
+        description = f'Recording {test_name}'
+        record_with_progress(
+            session=test_session,
+            wav_path=test_file,
+            description=description,
+            context_name=test_name,
+        )
 
     logger.info(f'Completed recording {len(test_files)} tests')
