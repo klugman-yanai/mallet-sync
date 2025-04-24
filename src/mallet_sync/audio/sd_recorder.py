@@ -9,8 +9,16 @@ import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
+from numpy._typing import DTypeLike
+
 # Use absolute imports
-from mallet_sync.config import get_logger
+from mallet_sync.config import (
+    MALLET_CHANNELS,
+    MALLET_DTYPE,
+    MALLET_SAMPLE_RATE,
+    RECORDER_CHUNK_SIZE,
+    get_logger,
+)
 
 logger = get_logger(__name__)
 
@@ -20,12 +28,12 @@ class AudioRecorder:
 
     def __init__(
         self,
-        device_index: int,
-        channels: int,
-        sample_rate: int,
-        chunk_size: int,
         output_file: Path,
-        dtype: str,
+        device_index: int,
+        channels: int = MALLET_CHANNELS,
+        sample_rate: int = MALLET_SAMPLE_RATE,
+        chunk_size: int = RECORDER_CHUNK_SIZE,
+        dtype: DTypeLike = MALLET_DTYPE,
     ):
         self.device_index = device_index
         self.channels = channels

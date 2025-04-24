@@ -19,6 +19,7 @@ RECORDER_CHUNK_SIZE = 1024
 MAIN_MALLET_INDEX = 1
 WIRED_MALLET_INDEX = 3
 FILENAME_TEMPLATE = 'mallet_{role}_{context}.wav'
+SLEEP_TIME_SEC = 3
 
 
 # --- Data Models ---
