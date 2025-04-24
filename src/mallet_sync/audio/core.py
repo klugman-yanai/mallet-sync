@@ -43,7 +43,8 @@ def play_silence(
         duration_sec: Duration of silence in seconds
         sample_rate: Sample rate for audio streaming
     """
-    logger.info(f'Streaming {duration_sec} seconds of silence and recording')
+    _silence_start_time = time.time()
+    logger.info(f'Starting ambient noise calibration: {duration_sec} seconds of silence')
 
     # Create a StreamPlayer that produces silence
     class SilenceStreamPlayer:
@@ -142,6 +143,9 @@ def check_ambient_files(input_dir: Path) -> bool:
     ambient_files: list[Path] = list(ambient_dir.glob('*.wav')) if ambient_dir.exists() else []
 
     has_ambient_files = len(ambient_files) > 0
+    logger.debug(f'Ambient directory: {ambient_dir.resolve()}')
+    logger.debug(f'Found {len(ambient_files)} ambient files')
+
     if not has_ambient_files:
         logger.info('No ambient noise files found. Will play 10 seconds of silence first.')
 
@@ -171,7 +175,7 @@ def play_and_record_cycle_with_silence(
     try:
         silence_duration = silence_player.duration
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        logger.info(f'Playing silence for {silence_duration:.2f} seconds')
+        logger.info(f'Recording ambient silence for calibration ({silence_duration:.1f} seconds)')
 
         # Initialize recorders for each mallet device
         recorders = []
@@ -180,6 +184,7 @@ def play_and_record_cycle_with_silence(
             output_path = (
                 output_dir / f'silence_{timestamp}_device{i}_{friendly_name.replace(" ", "_")}.wav'
             )
+            logger.debug(f'Creating silence recorder for device {device.index} to {output_path.name}')
 
             # Create recorder for this device
             recorder = AudioRecorder(
@@ -232,20 +237,54 @@ def process_audio_batch(
         needs_silence: Whether to play silence before processing files
     """
     start_time = time.time()
+    total_files = len(files)
+
+    # Log batch processing start with device info
+    logger.info(f'Starting batch processing of {total_files} files using {len(mallet_devices)} devices')
+    device_names = [f'{name} (ID: {info.index})' for info, name in mallet_devices]
+    for device in device_names:
+        logger.debug(f'Device: {device}')
 
     # Play silence directly if needed
     if needs_silence:
+        silence_start = time.time()
         play_silence(mallet_devices, output_dir)
+        silence_duration = time.time() - silence_start
+        logger.info(f'Ambient silence recording completed in {silence_duration:.1f} seconds')
+        logger.debug(f'Sleeping for {sleep_time_sec} seconds before starting file processing')
         time.sleep(sleep_time_sec)
 
     # Process all regular files
-    for wav_file in files:
+    for idx, wav_file in enumerate(files, 1):
+        file_start = time.time()
+        logger.info(f'Processing file {idx}/{total_files}: {wav_file.name}')
         play_and_record_cycle(mallet_devices, wav_file, output_dir)
-        time.sleep(sleep_time_sec)
+        file_duration = time.time() - file_start
 
-    # Log completion
-    end_time = time.time()
-    logger.info(f'All processing finished in {end_time - start_time:.2f} seconds.')
+        # Format as minutes:seconds if over 60 seconds
+        if file_duration >= 60:
+            minutes = int(file_duration // 60)
+            seconds = file_duration % 60
+            duration_str = f'{minutes}m {seconds:.1f}s'
+        else:
+            duration_str = f'{file_duration:.1f} seconds'
+
+        logger.info(f'File {idx}/{total_files} processed in {duration_str}')
+
+        if idx < total_files:
+            logger.debug(f'Sleeping for {sleep_time_sec} seconds before next file')
+            time.sleep(sleep_time_sec)
+
+    # Log completion with human-readable total time
+    total_duration = time.time() - start_time
+    if total_duration >= 60:
+        minutes = int(total_duration // 60)
+        seconds = total_duration % 60
+        duration_str = f'{minutes}m {seconds:.1f}s'
+    else:
+        duration_str = f'{total_duration:.1f} seconds'
+
+    logger.info(f'All processing finished in {duration_str}')
     logger.info(f'Recordings saved in: {output_dir.resolve()}')
 
 
@@ -266,7 +305,14 @@ def play_and_record_cycle(
 
     All processes work with chunks to ensure continuous processing without frame drops.
     """
-    logger.info(f'--- Processing: {wav_path.name} ---')
+    cycle_start_time = time.time()
+
+    # Get file size in human-readable format
+    file_size_bytes = wav_path.stat().st_size
+    file_size_mb = file_size_bytes / (1024 * 1024)
+
+    logger.info(f'--- Processing: {wav_path.name} ({file_size_mb:.2f} MB) ---')
+    logger.debug(f'Starting process cycle for {wav_path} at {cycle_start_time}')
     context_name = wav_path.stem
 
     # Setup player with chunked streaming
@@ -311,10 +357,18 @@ def play_and_record_cycle(
             return
 
         # Allow recorders a moment to initialize
+        logger.debug('Brief pause for recorder initialization')
         time.sleep(0.2)
 
         # STEP 2: Start streaming playback
-        logger.info(f'Starting streaming playback of {wav_path.name} ({player.duration:.2f}s)')
+        playback_start_time = time.time()
+        formatted_duration = (
+            f'{int(player.duration // 60)}:{player.duration % 60:04.1f}'
+            if player.duration >= 60
+            else f'{player.duration:.1f}s'
+        )
+        logger.info(f'Playing {wav_path.name} (duration: {formatted_duration})')
+        logger.debug(f'Starting streaming playback at {playback_start_time}')
         try:
             player.start()
         except Exception:
@@ -322,12 +376,18 @@ def play_and_record_cycle(
             # Continue recording to capture silence
 
         # STEP 3: Wait for playback to complete
-        logger.info('Waiting for playback to complete...')
+        logger.debug('Waiting for playback to complete...')
         player.join()
-        logger.info(f'Playback of {wav_path.name} complete.')
+        playback_time = time.time() - playback_start_time
+        formatted_playback_time = (
+            f'{int(playback_time // 60)}:{playback_time % 60:04.1f}'
+            if playback_time >= 60
+            else f'{playback_time:.1f}s'
+        )
+        logger.info(f'Playback of {wav_path.name} complete in {formatted_playback_time}')
 
         # STEP 4: Stop recording (but file writing continues)
-        logger.info('Stopping recorders (file writing continues)...')
+        logger.debug('Stopping recorders (file writing continues)...')
         for recorder in active_recorders:
             try:
                 recorder.stop()
@@ -335,13 +395,16 @@ def play_and_record_cycle(
                 logger.exception(f'Error stopping recorder {recorder.output_file.name}')
 
         # STEP 5: Wait for any remaining data to be written to files
-        logger.info('Waiting for file writing to complete...')
+        logger.debug('Waiting for file writing to complete...')
+        file_writing_start = time.time()
         for recorder in active_recorders:
             try:
                 # Wait for both recording and writing to complete
                 recorder.join()
             except Exception:
                 logger.exception(f'Error joining recorder {recorder.output_file.name}')
+        file_writing_time = time.time() - file_writing_start
+        logger.debug(f'File writing completed in {file_writing_time:.1f} seconds')
 
     except Exception:
         logger.exception(f'Unhandled error during recording cycle for {wav_path.name}')
@@ -360,4 +423,26 @@ def play_and_record_cycle(
                 with contextlib.suppress(Exception):
                     recorder.stop()
 
-    logger.info(f'--- Finished processing: {wav_path.name} ---')
+    total_cycle_time = time.time() - cycle_start_time
+    if total_cycle_time >= 60:
+        minutes = int(total_cycle_time // 60)
+        seconds = total_cycle_time % 60
+        cycle_time_str = f'{minutes}m {seconds:.1f}s'
+    else:
+        cycle_time_str = f'{total_cycle_time:.1f} seconds'
+
+    # Calculate and log output file sizes
+    output_sizes = []
+    for recorder in recorders:
+        if recorder.output_file.exists():
+            size_bytes = recorder.output_file.stat().st_size
+            size_mb = size_bytes / (1024 * 1024)
+            output_sizes.append((recorder.output_file.name, size_mb))
+
+    logger.info(f'--- Finished processing: {wav_path.name} in {cycle_time_str} ---')
+    for name, size in output_sizes:
+        logger.debug(f'  Output: {name} ({size:.2f} MB)')
+
+    # Log a summary of the outputs at info level
+    total_output_size = sum(size for _, size in output_sizes)
+    logger.info(f'Created {len(output_sizes)} output files ({total_output_size:.2f} MB total)')

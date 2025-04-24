@@ -24,6 +24,40 @@ logger = get_logger(__name__)
 
 # === Device detection and selection utilities ===
 
+
+def check_maya44_output_device() -> bool:
+    """
+    Check if the default output device is a MAYA44 device.
+
+    Returns:
+        True if MAYA44 is the default output, False otherwise
+    """
+    try:
+        # Get the default output device
+        default_output = sd.query_devices(kind='output')
+
+        if not isinstance(default_output, dict):
+            default_output = dict(default_output)
+
+        device_name = default_output.get('name', '').lower()
+        logger.debug(f'Default output device: {device_name}')
+
+        # Check if it's a MAYA44 device
+        is_maya44 = 'maya44' in device_name
+
+        if not is_maya44:
+            logger.error(
+                f'Default output device is not a MAYA44 device: {default_output.get("name")}. '
+                'Please set MAYA44 as your default playback device in the Sound control panel.',
+            )
+
+    except Exception:
+        logger.exception('Error checking output device')
+        return False
+    else:
+        return is_maya44
+
+
 def _get_device_info(device_index: int) -> DeviceInfo | None:
     """Retrieve simplified device information."""
     try:
@@ -66,15 +100,13 @@ def find_mallet_devices() -> list[tuple[DeviceInfo, str]]:
         logger.critical(f'Failed to query audio devices: {e}')
         return []
 
-    logger.info('Scanning for Mallet input devices...')
+    logger.debug('Scanning for Mallet input devices...')
 
     # Get all potential Mallet devices
-    all_mallet_matches = [
-        _get_device_info(idx) for idx in range(len(devices_raw))
-    ]
+    all_mallet_matches = [_get_device_info(idx) for idx in range(len(devices_raw))]
     all_mallet_matches = [dev for dev in all_mallet_matches if dev and is_mallet_device(dev)]
 
-    logger.info(f'Found {len(all_mallet_matches)} potential Mallet devices. Selecting targets...')
+    logger.debug(f'Found {len(all_mallet_matches)} potential Mallet devices. Selecting targets...')
 
     if len(all_mallet_matches) < 2:
         logger.error(f'Found only {len(all_mallet_matches)} Mallet devices, need at least 2.')
@@ -88,10 +120,10 @@ def find_mallet_devices() -> list[tuple[DeviceInfo, str]]:
     for dev in all_mallet_matches:
         if dev.index == MAIN_MALLET_INDEX:
             result.append((dev, 'main'))
-            logger.info(f"Selected 'main' Mallet: [{dev.index}] {dev.name}")
+            logger.debug(f"Selected 'main' Mallet: [{dev.index}] {dev.name}")
         elif dev.index == WIRED_MALLET_INDEX:
             result.append((dev, 'wired'))
-            logger.info(f"Selected 'wired' Mallet: [{dev.index}] {dev.name}")
+            logger.debug(f"Selected 'wired' Mallet: [{dev.index}] {dev.name}")
         else:
             remaining.append(dev)
 
@@ -108,18 +140,19 @@ def find_mallet_devices() -> list[tuple[DeviceInfo, str]]:
             if role not in current_roles and remaining:
                 dev = remaining.pop(0)
                 result.append((dev, role))
-                logger.info(f"Selected '{role}' Mallet (fallback): [{dev.index}] {dev.name}")
+                logger.debug(f"Selected '{role}' Mallet (fallback): [{dev.index}] {dev.name}")
 
     # Verify we have exactly 2 devices
     if len(result) != 2:
         logger.error(f'Expected 2 Mallet input devices, but selected {len(result)}.')
         return []
 
-    logger.info(f'Successfully selected {len(result)} target Mallet devices.')
+    logger.info(f'Successfully selected {len(result)} Mallet devices for recording')
     return result
 
 
 # === File operations utilities ===
+
 
 def scan_audio_files(input_dir: Path, *, exclude_calibration: bool = False) -> list[Path]:
     """
@@ -142,9 +175,9 @@ def scan_audio_files(input_dir: Path, *, exclude_calibration: bool = False) -> l
     # Select which directories to process based on the flag
     subdirs = test_dirs if exclude_calibration else calibration_dirs + test_dirs
 
-    logger.info(f"Scanning for WAV files in subdirectories of '{input_dir.resolve()}'...")
+    logger.debug(f"Scanning for WAV files in subdirectories of '{input_dir.resolve()}'...")
     if exclude_calibration:
-        logger.info('Calibration files excluded - only processing test files')
+        logger.info('Processing test files only (calibration files excluded)')
 
     for subdir in subdirs:
         subdir_path = input_dir / subdir
@@ -155,14 +188,14 @@ def scan_audio_files(input_dir: Path, *, exclude_calibration: bool = False) -> l
         try:
             found = sorted(list(subdir_path.glob('*.wav')))
             files_to_process.extend(found)
-            logger.info(f"  Found {len(found)} WAV files in '{subdir}'")
+            logger.debug(f"Found {len(found)} WAV files in '{subdir}'")
         except Exception:
             logger.exception(f"Error scanning subdirectory '{subdir}'")
 
     if not files_to_process:
         logger.warning(f'No WAV files found in any of the subdirectories: {subdirs}')
     else:
-        logger.info(f'Total files to process: {len(files_to_process)}')
+        logger.info(f'Ready to process {len(files_to_process)} WAV files')
 
     return files_to_process
 
@@ -190,7 +223,7 @@ def create_output_dir(base_dir: Path) -> Path:
 
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f'Created output directory: {output_dir.resolve()}')
+        logger.debug(f'Created output directory: {output_dir.resolve()}')
     except OSError:
         logger.critical(f'Failed to create output directory {output_dir}')
         raise
