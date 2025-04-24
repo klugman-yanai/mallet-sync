@@ -1,0 +1,204 @@
+# utils.py
+"""Consolidated utilities for file operations and device detection."""
+
+from datetime import datetime
+from pathlib import Path
+
+import sounddevice as sd
+
+from rapidfuzz.fuzz import partial_ratio
+
+# Use absolute imports
+from mallet_sync.config import (
+    FILENAME_TEMPLATE,
+    MAIN_MALLET_INDEX,
+    MALLET_CHANNELS,
+    MALLET_KEYWORDS,
+    WIRED_MALLET_INDEX,
+    DeviceInfo,
+    get_logger,
+)
+
+logger = get_logger(__name__)
+
+
+# === Device detection and selection utilities ===
+
+def _get_device_info(device_index: int) -> DeviceInfo | None:
+    """Retrieve simplified device information."""
+    try:
+        idx = int(device_index)
+        device_info_raw = sd.query_devices(idx)
+        if not isinstance(device_info_raw, dict):
+            device_info_raw = dict(device_info_raw)
+
+        return DeviceInfo(
+            name=str(device_info_raw.get('name', 'Unknown')),
+            index=idx,
+            hostapi=int(device_info_raw.get('hostapi', -1)),
+            max_input_channels=int(device_info_raw.get('max_input_channels', 0)),
+            max_output_channels=int(device_info_raw.get('max_output_channels', 0)),
+            default_samplerate=float(device_info_raw.get('default_samplerate', 0.0)),
+            supported_samplerates=device_info_raw.get('supported_samplerates', []),
+        )
+    except Exception:
+        logger.exception(f'Error querying device {device_index}')
+        return None
+
+
+def is_mallet_device(device: DeviceInfo) -> bool:
+    """Determine if a device is a Mallet device based on name matching."""
+    if device.max_input_channels < MALLET_CHANNELS:
+        return False
+
+    dev_name_lower = device.name.lower()
+    return any(partial_ratio(dev_name_lower, keyword) >= 80 for keyword in MALLET_KEYWORDS)
+
+
+def find_mallet_devices() -> list[tuple[DeviceInfo, str]]:
+    """
+    Selects exactly two Mallet input devices, prioritizing indices
+    1 ('main') and 3 ('wired').
+    """
+    try:
+        devices_raw = sd.query_devices()
+    except Exception as e:
+        logger.critical(f'Failed to query audio devices: {e}')
+        return []
+
+    logger.info('Scanning for Mallet input devices...')
+
+    # Get all potential Mallet devices
+    all_mallet_matches = [
+        _get_device_info(idx) for idx in range(len(devices_raw))
+    ]
+    all_mallet_matches = [dev for dev in all_mallet_matches if dev and is_mallet_device(dev)]
+
+    logger.info(f'Found {len(all_mallet_matches)} potential Mallet devices. Selecting targets...')
+
+    if len(all_mallet_matches) < 2:
+        logger.error(f'Found only {len(all_mallet_matches)} Mallet devices, need at least 2.')
+        return []
+
+    # Sort devices into preferred and other
+    result: list[tuple[DeviceInfo, str]] = []
+    remaining = []
+
+    # First, try to find devices at preferred indices
+    for dev in all_mallet_matches:
+        if dev.index == MAIN_MALLET_INDEX:
+            result.append((dev, 'main'))
+            logger.info(f"Selected 'main' Mallet: [{dev.index}] {dev.name}")
+        elif dev.index == WIRED_MALLET_INDEX:
+            result.append((dev, 'wired'))
+            logger.info(f"Selected 'wired' Mallet: [{dev.index}] {dev.name}")
+        else:
+            remaining.append(dev)
+
+    # If we don't have exactly 2 devices yet, use the remaining ones
+    if len(result) < 2 and remaining:
+        # Sort by index for consistent selection
+        remaining.sort(key=lambda d: d.index)
+
+        # Add missing devices
+        roles = ['main', 'wired']
+        current_roles = [role for _, role in result]
+
+        for role in roles:
+            if role not in current_roles and remaining:
+                dev = remaining.pop(0)
+                result.append((dev, role))
+                logger.info(f"Selected '{role}' Mallet (fallback): [{dev.index}] {dev.name}")
+
+    # Verify we have exactly 2 devices
+    if len(result) != 2:
+        logger.error(f'Expected 2 Mallet input devices, but selected {len(result)}.')
+        return []
+
+    logger.info(f'Successfully selected {len(result)} target Mallet devices.')
+    return result
+
+
+# === File operations utilities ===
+
+def scan_audio_files(input_dir: Path, *, exclude_calibration: bool = False) -> list[Path]:
+    """
+    Scans subdirectories for WAV files to process in a specific order.
+
+    Args:
+        input_dir: Base directory containing the subdirectories
+        exclude_calibration: If True, excludes calibration directories (ambient, kardome_*)
+                            If False, includes all directories
+
+    Order of processing (when all included):
+    ambient -> kardome_afe -> kardome_bio -> kardome_kws -> test_audio
+    """
+    files_to_process: list[Path] = []
+
+    # All subdirectories in processing order
+    calibration_dirs = ['ambient', 'kardome_afe', 'kardome_bio', 'kardome_kws']
+    test_dirs = ['test_audio']
+
+    # Select which directories to process based on the flag
+    subdirs = test_dirs if exclude_calibration else calibration_dirs + test_dirs
+
+    logger.info(f"Scanning for WAV files in subdirectories of '{input_dir.resolve()}'...")
+    if exclude_calibration:
+        logger.info('Calibration files excluded - only processing test files')
+
+    for subdir in subdirs:
+        subdir_path = input_dir / subdir
+        if not subdir_path.exists():
+            logger.warning(f"Subdirectory '{subdir}' does not exist. Skipping.")
+            continue
+
+        try:
+            found = sorted(list(subdir_path.glob('*.wav')))
+            files_to_process.extend(found)
+            logger.info(f"  Found {len(found)} WAV files in '{subdir}'")
+        except Exception:
+            logger.exception(f"Error scanning subdirectory '{subdir}'")
+
+    if not files_to_process:
+        logger.warning(f'No WAV files found in any of the subdirectories: {subdirs}')
+    else:
+        logger.info(f'Total files to process: {len(files_to_process)}')
+
+    return files_to_process
+
+
+def create_output_dir(base_dir: Path) -> Path:
+    """Creates a timestamp directory with date and 24-hour time."""
+    now = datetime.now()
+
+    # Create a format with year-month-day and 24-hour time: "250424_1030"
+    date_part = now.strftime('%y%m%d')  # Year-Month-Day
+    time_part = now.strftime('%H%M')  # 24-hour-Minute
+
+    # Create a folder name that's easy to locate by time
+    folder_name = f'{date_part}_{time_part}'
+
+    # Add seconds for uniqueness if needed
+    unique_id = now.strftime('%S')
+
+    # Create directory path
+    output_dir = base_dir / folder_name
+
+    # Handle duplicate directory names by adding the seconds as a suffix if needed
+    if output_dir.exists():
+        output_dir = base_dir / f'{folder_name}_{unique_id}'
+
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f'Created output directory: {output_dir.resolve()}')
+    except OSError:
+        logger.critical(f'Failed to create output directory {output_dir}')
+        raise
+
+    return output_dir
+
+
+def generate_output_path(output_dir: Path, role: str, context: str) -> Path:
+    """Generates the full path for an output recording file."""
+    filename = FILENAME_TEMPLATE.format(role=role, context=context)
+    return output_dir / filename

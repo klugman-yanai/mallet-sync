@@ -1,45 +1,50 @@
 # main.py
+import argparse
 import sys
 import time
 
+from pathlib import Path
+
 # Use absolute imports
 from mallet_sync.audio.core import play_and_record_cycle
-from mallet_sync.config.config import INPUT_AUDIO_DIR, OUTPUT_BASE_DIR, get_logger
-from mallet_sync.utils.device_utils import find_mallet_devices
-from mallet_sync.utils.file_utils import create_output_dir, scan_audio_files
+from mallet_sync.config import INPUT_AUDIO_DIR, OUTPUT_BASE_DIR, get_logger
+from mallet_sync.utils import create_output_dir, find_mallet_devices, scan_audio_files
 
 logger = get_logger(__name__)  # Get logger for main module
 
 
+def parse_arguments() -> argparse.Namespace:
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='Mallet Sync Recording System')
+    parser.add_argument(
+        '--exclude-calibration',
+        action='store_true',
+        help='Process only test files, exclude calibration files',
+    )
+    return parser.parse_args()
+
+
 def main():
     """Main entry point for the mallet-sync recording script."""
+    # Parse command line arguments
+    args = parse_arguments()
+
     logger.info('Starting Mallet Sync Recorder (using default output)...')
 
     # 1. Find Mallet Devices
     selected_mallets = find_mallet_devices()
-    if not selected_mallets:
-        logger.critical('Could not select exactly two required Mallet devices. Exiting.')
-        sys.exit(1)
 
     # 2. Scan for Audio Files
-    files_to_process = scan_audio_files(INPUT_AUDIO_DIR)
-    if not files_to_process:
-        logger.warning(f'No input audio files found in {INPUT_AUDIO_DIR}. Nothing to process.')
-        sys.exit(0)
+    files_to_process = scan_audio_files(INPUT_AUDIO_DIR, exclude_calibration=args.exclude_calibration)
 
     # 3. Create Output Directory
-    try:
-        output_dir = create_output_dir(OUTPUT_BASE_DIR)
-    except Exception:
-        logger.critical('Failed to prepare output directory. Exiting.')
-        sys.exit(1)
+    output_dir = create_output_dir(OUTPUT_BASE_DIR)
 
     # 4. Run Recording Cycles
     logger.info(f'Processing {len(files_to_process)} audio files...')
     start_time = time.time()
     for wav_file in files_to_process:
         play_and_record_cycle(selected_mallets, wav_file, output_dir)
-        # Add a small pause between cycles if desired
         time.sleep(0.5)
 
     end_time = time.time()

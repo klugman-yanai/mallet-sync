@@ -1,4 +1,4 @@
-# config/config.py
+# config.py
 import logging
 
 from dataclasses import dataclass, field

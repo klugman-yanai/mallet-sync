@@ -1,10 +1,12 @@
 # audio/core.py
+import contextlib
 import threading
 import time
 
 from pathlib import Path
+from typing import Optional
 
-import sounddevice as sd  # Keep for sd.stop() if needed
+import sounddevice as sd
 
 # Use absolute imports
 from mallet_sync.audio.sd_player import AudioPlayer
@@ -17,7 +19,7 @@ from mallet_sync.config import (
     DeviceInfo,
     get_logger,
 )
-from mallet_sync.utils.file_utils import generate_output_path
+from mallet_sync.utils import generate_output_path
 
 logger = get_logger(__name__)
 
@@ -26,21 +28,29 @@ def play_and_record_cycle(
     mallet_devices: list[tuple[DeviceInfo, str]],
     wav_path: Path,
     output_dir: Path,
-):
+) -> None:
     """
-    Plays one WAV file on default output and records from Mallet devices
-    using dedicated Player and Recorder classes.
+    Plays one WAV file on default output and records from Mallet devices using streaming.
+
+    Following the exact threading flow:
+    1. Recorder.start (starts both recording and file writing threads)
+    2. Player.start (begins streaming playback)
+    3. Player.join (waits for playback to complete)
+    4. Recorder.stop (stops recording but continues file writing)
+    5. Recorder.join (waits for any remaining data to be written to files)
+
+    All processes work with chunks to ensure continuous processing without frame drops.
     """
     logger.info(f'--- Processing: {wav_path.name} ---')
     context_name = wav_path.stem
 
-    # --- Player Setup ---
-    player = AudioPlayer(wav_path)
+    # Setup player with chunked streaming
+    player = AudioPlayer(wav_path, chunk_size=RECORDER_CHUNK_SIZE)
     if not player.can_play:
         logger.error(f'Cannot prepare player for {wav_path.name}. Skipping cycle.')
-        return  # Skip if player couldn't load audio
+        return
 
-    # --- Recorder Setup ---
+    # Setup recorders with streaming processing
     recorders: list[AudioRecorder] = []
     for dev_info, role in mallet_devices:
         out_path = generate_output_path(output_dir, role, context_name)
@@ -54,77 +64,75 @@ def play_and_record_cycle(
         )
         recorders.append(recorder)
 
-    # --- Execute Playback and Recording ---
-    active_recorders = []
-    playback_started = False
+    if not recorders:
+        logger.error('No recorders could be created. Skipping cycle.')
+        return
+
+    active_recorders: list[AudioRecorder] = []
+
     try:
-        # Start recorders first
-        for r in recorders:
+        # STEP 1: Start recorders (begins both recording and file writing)
+        logger.info('Starting streaming recorders...')
+        for recorder in recorders:
             try:
-                r.start()
-                active_recorders.append(r)
+                recorder.start()
+                active_recorders.append(recorder)
+                logger.debug(f'Started streaming recorder for {recorder.output_file.name}')
             except Exception:
-                # Error logged within start() or here
-                logger.exception(f'Failed to start recorder {r.output_file.name}')
+                logger.exception(f'Failed to start recorder {recorder.output_file.name}')
 
         if not active_recorders:
             logger.error('No recorders started successfully. Skipping cycle.')
             return
 
-        # Give recorders a moment to initialize
+        # Allow recorders a moment to initialize
         time.sleep(0.2)
 
-        # Start playback
+        # STEP 2: Start streaming playback
+        logger.info(f'Starting streaming playback of {wav_path.name} ({player.duration:.2f}s)')
         try:
             player.start()
-            playback_started = True
         except Exception:
             logger.exception(f'Failed to start playback for {wav_path.name}')
-            # Continue to record silence for the duration
+            # Continue recording to capture silence
 
-        # --- Wait for Playback or Simulate Duration ---
-        if playback_started:
-            logger.info(f'Waiting for playback of {wav_path.name} ({player.duration:.2f}s) to finish...')
-            player.join()  # Wait for the player's thread to complete
-            logger.info(f'Playback finished for {wav_path.name}.')
-        else:
-            # Simulate duration if playback didn't start
-            duration_to_wait = (
-                player.duration if player.duration > 0 else 1.0
-            )  # Default wait if duration unknown
-            logger.info(
-                f'Playback failed or skipped. Recording silence for estimated duration: {duration_to_wait:.2f}s',
-            )
-            time.sleep(max(0.0, duration_to_wait))
-            logger.info('Simulated duration finished.')
+        # STEP 3: Wait for playback to complete
+        logger.info('Waiting for playback to complete...')
+        player.join()
+        logger.info(f'Playback of {wav_path.name} complete.')
+
+        # STEP 4: Stop recording (but file writing continues)
+        logger.info('Stopping recorders (file writing continues)...')
+        for recorder in active_recorders:
+            try:
+                recorder.stop()
+            except Exception:
+                logger.exception(f'Error stopping recorder {recorder.output_file.name}')
+
+        # STEP 5: Wait for any remaining data to be written to files
+        logger.info('Waiting for file writing to complete...')
+        for recorder in active_recorders:
+            try:
+                # Wait for both recording and writing to complete
+                recorder.join()
+            except Exception:
+                logger.exception(f'Error joining recorder {recorder.output_file.name}')
 
     except Exception:
-        logger.exception(f'Unhandled error during main recording cycle for {wav_path.name}')
-    finally:
-        # --- Stop Recorders ---
-        logger.info(f'Stopping recorders for {context_name}...')
-        # Use a separate loop to signal stop first (less critical with blocking play)
-        # for r in active_recorders:
-        #     try: r.stop() # Stop now handles join and write
-        #     except Exception: logger.exception(f"Error stopping recorder {r.output_file.name}")
+        logger.exception(f'Unhandled error during recording cycle for {wav_path.name}')
 
-        # Ensure recorders are stopped and files written even if errors occurred
-        # Call stop individually to handle potential write errors per file
-        for r in active_recorders:
-            try:
-                r.stop()  # stop() includes join() and _write_file()
-            except Exception:
-                # Errors during stop/join/write are logged within stop()
-                logger.exception(f'Error during final stop/write for {r.output_file.name}')
-
-        # Check if playback thread unexpectedly hung (unlikely with blocking play in thread)
-        if playback_started and player.is_playing:
-            logger.warning(
-                f'Playback thread for {wav_path.name} still seems active after join? Attempting sd.stop().',
-            )
+        # Emergency cleanup if we're exiting due to an exception
+        if player.is_playing:
+            logger.warning('Forcing audio stop via sd.stop()')
             try:
                 sd.stop()
             except Exception:
                 logger.exception('Error calling sd.stop()')
 
-        logger.info(f'--- Finished processing: {wav_path.name} ---')
+        # Ensure we attempt to stop all recorders
+        for recorder in active_recorders:
+            if recorder.is_recording:
+                with contextlib.suppress(Exception):
+                    recorder.stop()
+
+    logger.info(f'--- Finished processing: {wav_path.name} ---')
