@@ -11,10 +11,10 @@ from rapidfuzz.fuzz import partial_ratio
 # Use absolute imports
 from mallet_sync.config import (
     FILENAME_TEMPLATE,
-    MAIN_MALLET_INDEX,
     MALLET_CHANNELS,
     MALLET_KEYWORDS,
-    WIRED_MALLET_INDEX,
+    MALLET_ROLES,
+    NUM_MALLETS,
     DeviceInfo,
     get_logger,
 )
@@ -91,8 +91,9 @@ def is_mallet_device(device: DeviceInfo) -> bool:
 
 def find_mallet_devices() -> list[tuple[DeviceInfo, str]]:
     """
-    Selects exactly two Mallet input devices, prioritizing indices
-    1 ('main') and 3 ('wired').
+    Finds and labels Mallet input devices based on discovery order.
+    First device found becomes 'main', second 'wired', third 'hmtc', etc.
+    based on the MALLET_ROLES configuration.
     """
     try:
         devices_raw = sd.query_devices()
@@ -108,46 +109,21 @@ def find_mallet_devices() -> list[tuple[DeviceInfo, str]]:
 
     logger.debug(f'Found {len(all_mallet_matches)} potential Mallet devices. Selecting targets...')
 
-    if len(all_mallet_matches) < 2:
-        logger.error(f'Found only {len(all_mallet_matches)} Mallet devices, need at least 2.')
+    if len(all_mallet_matches) < NUM_MALLETS:
+        logger.error(f'Found only {len(all_mallet_matches)} Mallet devices, need at least {NUM_MALLETS}.')
         return []
 
-    # Sort devices into preferred and other
+    # Sort by device index for consistent selection
+    all_mallet_matches.sort(key=lambda dev: dev.index)
+
+    # Assign roles based on discovery order using the role names from config
     result: list[tuple[DeviceInfo, str]] = []
-    remaining = []
+    for i, dev in enumerate(all_mallet_matches[:NUM_MALLETS]):
+        # Use the role name from config or fallback to a numbered role if we have more mallets than defined roles
+        role = MALLET_ROLES[i] if i < len(MALLET_ROLES) else f'mallet_{i + 1}'
+        result.append((dev, role))
+        logger.debug(f"Selected '{role}' Mallet: [{dev.index}] {dev.name}")
 
-    # First, try to find devices at preferred indices
-    for dev in all_mallet_matches:
-        if dev.index == MAIN_MALLET_INDEX:
-            result.append((dev, 'main'))
-            logger.debug(f"Selected 'main' Mallet: [{dev.index}] {dev.name}")
-        elif dev.index == WIRED_MALLET_INDEX:
-            result.append((dev, 'wired'))
-            logger.debug(f"Selected 'wired' Mallet: [{dev.index}] {dev.name}")
-        else:
-            remaining.append(dev)
-
-    # If we don't have exactly 2 devices yet, use the remaining ones
-    if len(result) < 2 and remaining:
-        # Sort by index for consistent selection
-        remaining.sort(key=lambda d: d.index)
-
-        # Add missing devices
-        roles = ['main', 'wired']
-        current_roles = [role for _, role in result]
-
-        for role in roles:
-            if role not in current_roles and remaining:
-                dev = remaining.pop(0)
-                result.append((dev, role))
-                logger.debug(f"Selected '{role}' Mallet (fallback): [{dev.index}] {dev.name}")
-
-    # Verify we have exactly 2 devices
-    if len(result) != 2:
-        logger.error(f'Expected 2 Mallet input devices, but selected {len(result)}.')
-        return []
-
-    logger.info(f'Successfully selected {len(result)} Mallet devices for recording')
     return result
 
 
@@ -235,3 +211,14 @@ def generate_output_path(output_dir: Path, role: str, context: str) -> Path:
     """Generates the full path for an output recording file."""
     filename = FILENAME_TEMPLATE.format(role=role, context=context)
     return output_dir / filename
+
+
+if __name__ == '__main__':
+
+    mallet1, mallet2, mallet3 = find_mallet_devices()
+
+    from pprint import pprint
+
+    pprint(mallet1)
+    pprint(mallet2)
+    pprint(mallet3)

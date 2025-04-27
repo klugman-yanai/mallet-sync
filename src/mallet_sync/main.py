@@ -17,7 +17,14 @@ from typing import NoReturn
 
 # Use absolute imports for stability and clarity
 from mallet_sync.audio.core import check_ambient_files, process_audio_batch
-from mallet_sync.config import INPUT_AUDIO_DIR, OUTPUT_BASE_DIR, SLEEP_TIME_SEC, get_logger
+from mallet_sync.config import (
+    INPUT_AUDIO_DIR,
+    MALLET_ROLES,
+    NUM_MALLETS,
+    OUTPUT_BASE_DIR,
+    SLEEP_TIME_SEC,
+    get_logger,
+)
 from mallet_sync.logging_utils import log_completion_summary, log_startup_info
 from mallet_sync.utils import (
     check_maya44_output_device,
