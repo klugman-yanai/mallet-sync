@@ -34,46 +34,82 @@ def handle_keyboard_interrupt(signum: int, frame: object) -> NoReturn:
     sys.exit(0)
 
 
-def main() -> None:
-    signal.signal(signal.SIGINT, handle_keyboard_interrupt)
-    time.sleep(5)
-    start_time = time.time()
-    log_startup_info(INPUT_AUDIO_DIR, OUTPUT_BASE_DIR, SLEEP_TIME_SEC)
+def main() -> int:
+    """Main application entry point with robust error handling and device validation."""
+    try:
+        # Setup signal handler for clean exit on CTRL+C
+        signal.signal(signal.SIGINT, handle_keyboard_interrupt)
 
-    if not check_maya44_output_device():
-        return
+        # Brief delay to allow system initialization
+        logger.info('Starting mallet-sync, please wait...')
+        time.sleep(5)
 
-    mallet_devices = find_mallet_devices()
-    if not mallet_devices:
-        return
+        # Start timing and log startup information
+        start_time = time.time()
+        log_startup_info(INPUT_AUDIO_DIR, OUTPUT_BASE_DIR, SLEEP_TIME_SEC)
 
-    # NOTE: Skip calibration if needed here
-    files_to_process = scan_audio_files(
-        INPUT_AUDIO_DIR,
-        exclude_calibration=False,
-    )
-    if not files_to_process:
-        return
+        # Verify the playback device is correctly configured
+        if not check_maya44_output_device():
+            logger.error('Playback device validation failed. Cannot continue.')
+            return 1
 
-    has_ambient_files = check_ambient_files(INPUT_AUDIO_DIR)
+        # Find Mallet recording devices and verify sufficient devices are available
+        logger.info('Searching for connected Mallet devices...')
+        mallet_devices = find_mallet_devices()
+        if not mallet_devices:
+            logger.error('No suitable Mallet devices found. Please check device connections.')
+            return 1
 
-    session_dir = create_session_dir(OUTPUT_BASE_DIR)
-    role_dirs = create_role_dirs(session_dir, MALLET_ROLES)
+        # Validate device availability just before recording (devices may reconnect)
+        from mallet_sync.utils import validate_device_availability
+        if not validate_device_availability(mallet_devices):
+            logger.error('Device availability check failed. Please reconnect all devices and retry.')
+            return 1
 
-    process_audio_batch(
-        files=files_to_process,
-        mallet_devices=mallet_devices,
-        role_dirs=role_dirs,
-        sleep_time_sec=SLEEP_TIME_SEC,
-        needs_silence=not has_ambient_files,
-    )
+        # Discover audio files to process
+        logger.info('Scanning for audio files to process...')
+        files_to_process = scan_audio_files(
+            INPUT_AUDIO_DIR,
+            exclude_calibration=False,
+        )
+        if not files_to_process:
+            logger.error('No audio files found to process. Check input directory.')
+            return 1
 
-    log_completion_summary(
-        start_time,
-        len(files_to_process),
-        len(mallet_devices),
-        session_dir,
-    )
+        # Check if we need to record silence for calibration
+        has_ambient_files = check_ambient_files(INPUT_AUDIO_DIR)
+
+        # Create output directory structure
+        logger.info('Creating output directory structure...')
+        session_dir = create_session_dir(OUTPUT_BASE_DIR)
+        role_dirs = create_role_dirs(session_dir, MALLET_ROLES)
+
+        # Log recording configuration
+        logger.info(f'Starting recording with {len(mallet_devices)} devices')
+        for idx, (device, role) in enumerate(mallet_devices, 1):
+            logger.info(f'Device {idx}: [{device.index}] {device.name} as "{role}"')
+
+        # Process audio batch with all configured devices
+        process_audio_batch(
+            files=files_to_process,
+            mallet_devices=mallet_devices,
+            role_dirs=role_dirs,
+            sleep_time_sec=SLEEP_TIME_SEC,
+            needs_silence=not has_ambient_files,
+        )
+
+        # Log summary of processing session
+        log_completion_summary(
+            start_time,
+            len(files_to_process),
+            len(mallet_devices),
+            session_dir,
+        )
+    except Exception:
+        logger.exception('Unhandled error in main execution')
+        return 1
+
+    return 0
 
 
 if __name__ == '__main__':

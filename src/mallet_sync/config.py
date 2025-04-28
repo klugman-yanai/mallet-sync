@@ -21,6 +21,14 @@ SLEEP_TIME_SEC = 3
 NUM_MALLETS = 3
 MALLET_ROLES = ['hmtc', 'wired', 'main']
 
+# --- Audio Recorder Configuration ---
+# Queue size for audio data (frames) - increased for 9-channel audio
+RECORDER_QUEUE_SIZE = 2000
+# Number of frames to accumulate before writing to disk
+RECORDER_BUFFER_SIZE = 10
+# Seconds between forced buffer flushes
+RECORDER_FLUSH_INTERVAL = 3.0
+
 
 # --- Data Models ---
 @dataclass(frozen=True, slots=True)

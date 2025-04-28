@@ -119,34 +119,108 @@ def play_and_record_cycle_with_silence(
     role_dirs: dict[str, Path],
 ) -> None:
     """Record ambient silence for calibration, saving files in each role's subfolder."""
+    recorders = []
     try:
         silence_duration = silence_player.duration
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         logger.info(f'Recording ambient silence for calibration ({silence_duration:.1f} seconds)')
-        recorders = []
+
+        # Create a recorder for each device
+        failed_devices = []
         for i, (device, friendly_name) in enumerate(mallet_devices):
-            output_path = (
-                role_dirs[friendly_name]
-                / f'silence_{timestamp}_device{i}_{friendly_name.replace(" ", "_")}.wav'
+            try:
+                # Ensure role directory exists
+                role_dir = role_dirs[friendly_name]
+                role_dir.mkdir(parents=True, exist_ok=True)
+
+                # Generate output path
+                output_path = (
+                    role_dir / f'silence_{timestamp}_device{i}_{friendly_name.replace(" ", "_")}.wav'
+                )
+
+                logger.debug(
+                    f'Creating silence recorder for device {device.index} ({device.name}) to {output_path.name}',
+                )
+                recorder = AudioRecorder(
+                    output_file=output_path,
+                    device_index=device.index,
+                    channels=MALLET_CHANNELS,
+                    sample_rate=MALLET_SAMPLE_RATE,
+                    chunk_size=RECORDER_CHUNK_SIZE,
+                    dtype=MALLET_DTYPE,
+                )
+                recorders.append(recorder)
+            except Exception:
+                logger.exception(f'Failed to create recorder for device {device.index} ({device.name})')
+                failed_devices.append((device, friendly_name))
+
+        # Skip recording if all devices failed
+        if not recorders:
+            logger.error('No recorders could be created. Aborting silent recording.')
+            return
+
+        if failed_devices:
+            logger.warning(
+                f'Proceeding with {len(recorders)} devices. {len(failed_devices)} devices failed initialization.',
             )
-            logger.debug(f'Creating silence recorder for device {device.index} to {output_path.name}')
-            recorder = AudioRecorder(
-                output_file=output_path,
-                device_index=device.index,
-            )
-            recorders.append(recorder)
+
+        # Start all recorders first to ensure they're ready before playback begins
         logger.debug('Starting all recorders')
         for recorder in recorders:
-            recorder.start()
+            try:
+                recorder.start()
+            except Exception as e:
+                logger.exception(f'Failed to start recorder for {recorder.output_file.name}')
+                # Mark this recorder as invalid
+                recorder._exception = e
+
+        # Only keep recorders that started successfully
+        active_recorders = [r for r in recorders if r._exception is None]
+        if not active_recorders:
+            logger.error('No recorders could be started successfully. Aborting silent recording.')
+            return
+
+        # Start the silence player
         logger.debug('Starting silence player')
         silence_player.start()
+
+        # Monitor recording progress
+        start_time = time.time()
+        end_time = start_time + silence_duration + 1.0  # Add small buffer for cleanup
+
+        while time.time() < end_time:
+            # Check for any failures during recording
+            for recorder in active_recorders:
+                if recorder._exception is not None:
+                    logger.error(f'Recorder error detected: {recorder._exception}')
+
+            # Sleep for a short interval
+            time.sleep(0.5)
+
+        # Wait for silence player to complete
         silence_player.join()
+
+        # Stop all recorders
         logger.debug('Stopping all recorders')
-        for recorder in recorders:
-            recorder.stop()
-            recorder.join()
+        for recorder in active_recorders:
+            try:
+                recorder.stop()
+            except Exception:
+                logger.exception('Error stopping recorder')
+
+        # Wait for all recordings to complete
+        for recorder in active_recorders:
+            try:
+                if not recorder.wait_for_write_complete(timeout=10.0):
+                    logger.warning(
+                        f'Recorder did not complete writing within timeout: {recorder.output_file.name}',
+                    )
+            except Exception:
+                logger.exception('Error waiting for recorder completion')
+
+        # Log success
         logger.info(
-            f'Successfully played {silence_duration:.2f} seconds of silence and recorded from {len(recorders)} devices',
+            f'Successfully played {silence_duration:.2f} seconds of silence and recorded from {len(active_recorders)} devices',
         )
     except Exception:
         logger.exception('Error during silence play and record cycle')
@@ -252,22 +326,62 @@ def play_and_record_cycle(
         if not active_recorders:
             logger.error('No recorders started successfully. Skipping cycle.')
             return
+
+        # Short delay to ensure recorders are fully initialized
         logger.debug('Brief pause for recorder initialization')
         time.sleep(0.2)
+
+        # Format duration for user-friendly display
         playback_start_time = time.time()
         formatted_duration = (
             f'{int(player.duration // 60)}:{player.duration % 60:04.1f}'
             if player.duration >= 60
             else f'{player.duration:.1f}s'
         )
+
+        # Start playback with proper error handling
         logger.info(f'Playing {wav_path.name} (duration: {formatted_duration})')
         logger.debug(f'Starting streaming playback at {playback_start_time}')
         try:
             player.start()
+
+            # Monitor recording progress during playback
+            start_monitor = time.time()
+            check_interval = 5.0  # seconds between status checks
+            next_check = start_monitor + check_interval
+
+            # Continuously monitor while playback is active
+            while player.is_playing:
+                current_time = time.time()
+                elapsed = current_time - playback_start_time
+
+                # Periodic status updates
+                if current_time >= next_check:
+                    progress_pct = min(100.0, (elapsed / player.duration) * 100.0)
+                    logger.debug(
+                        f'Recording progress: {progress_pct:.1f}% ({elapsed:.1f}s / {player.duration:.1f}s)',
+                    )
+
+                    # Check for recorder errors
+                    for rec in active_recorders:
+                        if rec._exception is not None:
+                            logger.error(
+                                f'Error detected in recorder {rec.output_file.name}: {rec._exception}',
+                            )
+
+                    next_check = current_time + check_interval
+
+                # Don't consume too much CPU in monitoring loop
+                time.sleep(0.1)
+
         except Exception:
             logger.exception(f'Failed to start playback for {wav_path.name}')
+
+        # Wait for playback to complete
         logger.debug('Waiting for playback to complete...')
         player.join()
+
+        # Calculate and format playback statistics
         playback_time = time.time() - playback_start_time
         formatted_playback_time = (
             f'{int(playback_time // 60)}:{playback_time % 60:04.1f}'
@@ -275,33 +389,94 @@ def play_and_record_cycle(
             else f'{playback_time:.1f}s'
         )
         logger.info(f'Playback of {wav_path.name} complete in {formatted_playback_time}')
+
+        # Add a short delay to ensure we capture any trailing audio
+        time.sleep(0.5)
+
+        # Stop recorders with proper error handling
         logger.debug('Stopping recorders (file writing continues)...')
         for recorder in active_recorders:
             try:
                 recorder.stop()
             except Exception:
                 logger.exception(f'Error stopping recorder {recorder.output_file.name}')
-        logger.debug('Waiting for file writing to complete...')
-        file_writing_start = time.time()
+
+        # Wait for disk writes to complete with proper error handling
+        logger.debug('Waiting for recorders to flush to disk...')
+        failed_waits = 0
         for recorder in active_recorders:
             try:
-                recorder.join()
+                # Allow generous timeout for large files
+                if not recorder.wait_for_write_complete(timeout=30.0):
+                    logger.warning(
+                        f'Recorder {recorder.output_file.name} did not finish within timeout. '
+                        f'Frames recorded={recorder._frames_recorded}, written={recorder._frames_written}',
+                    )
+                    failed_waits += 1
+                else:
+                    # Calculate file statistics for successful writes
+                    if recorder.output_file.exists():
+                        file_size_mb = recorder.output_file.stat().st_size / (1024 * 1024)
+                        duration_sec = recorder._frames_written * RECORDER_CHUNK_SIZE / MALLET_SAMPLE_RATE
+                        logger.debug(
+                            f'Recording {recorder.output_file.name} complete: '
+                            f'{file_size_mb:.2f}MB, {duration_sec:.2f}s, '
+                            f'emergency_writes={recorder._emergency_writes}',
+                        )
             except Exception:
-                logger.exception(f'Error joining recorder {recorder.output_file.name}')
-        file_writing_time = time.time() - file_writing_start
-        logger.debug(f'File writing completed in {file_writing_time:.1f} seconds')
+                logger.exception(f'Error waiting for recorder {recorder.output_file.name}')
+                failed_waits += 1
+
+        # Calculate overall cycle statistics
+        cycle_time = time.time() - cycle_start_time
+        formatted_cycle_time = (
+            f'{int(cycle_time // 60)}:{cycle_time % 60:04.1f}' if cycle_time >= 60 else f'{cycle_time:.1f}s'
+        )
+
+        # Verify all recordings completed successfully
+        all_successful = failed_waits == 0
+        for recorder in active_recorders:
+            # Check for exceptions during recording
+            if recorder._exception is not None:
+                all_successful = False
+                logger.error(f'Recorder error occurred: {recorder._exception}')
+
+            # Check for frame mismatches (should match due to no-drop guarantee)
+            frame_diff = abs(recorder._frames_recorded - recorder._frames_written)
+            if frame_diff > 3:  # Allow small variation due to threading
+                logger.warning(
+                    f'Frame mismatch in {recorder.output_file.name}: '
+                    f'recorded={recorder._frames_recorded}, written={recorder._frames_written}, '
+                    f'diff={frame_diff}',
+                )
+                all_successful = False
+
+        # Log appropriate summary based on success status
+        if all_successful:
+            logger.info(
+                f'Cycle successfully completed in {formatted_cycle_time}. '
+                f'All {len(active_recorders)} recordings saved with no data loss.',
+            )
+        else:
+            logger.warning(
+                f'Cycle completed in {formatted_cycle_time} with {failed_waits} recorders '
+                f'not finishing properly. Some recordings may be affected.',
+            )
+
     except Exception:
         logger.exception(f'Unhandled error during recording cycle for {wav_path.name}')
-        if player.is_playing:
-            logger.warning('Forcing audio stop via sd.stop()')
-            try:
-                sd.stop()
-            except Exception:
-                logger.exception('Error calling sd.stop()')
+        # Ensure proper cleanup in case of error
+        try:
+            sd.stop()
+        except Exception:
+            logger.exception('Error calling sd.stop()')
         for recorder in active_recorders:
             if recorder.is_recording:
                 with contextlib.suppress(Exception):
                     recorder.stop()
+    else:
+        return
+
     total_cycle_time = time.time() - cycle_start_time
     if total_cycle_time >= 60:
         minutes = int(total_cycle_time // 60)
