@@ -19,7 +19,7 @@ RECORDER_CHUNK_SIZE = 1024
 FILENAME_TEMPLATE = 'mallet_{role}_{context}.wav'
 SLEEP_TIME_SEC = 3
 NUM_MALLETS = 3
-MALLET_ROLES = ['main', 'wired', 'hmtc']
+MALLET_ROLES = ['hmtc', 'wired', 'main']
 
 
 # --- Data Models ---

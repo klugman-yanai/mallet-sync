@@ -176,41 +176,43 @@ def scan_audio_files(input_dir: Path, *, exclude_calibration: bool = False) -> l
     return files_to_process
 
 
-def create_output_dir(base_dir: Path) -> Path:
-    """Creates a timestamp directory with date and 24-hour time."""
+def create_session_dir(base_dir: Path) -> Path:
+    """Creates a timestamp-based session directory under the base output directory."""
     now = datetime.now()
-
-    # Create a format with year-month-day and 24-hour time: "250424_1030"
     date_part = now.strftime('%y%m%d')  # Year-Month-Day
     time_part = now.strftime('%H%M')  # 24-hour-Minute
-
-    # Create a folder name that's easy to locate by time
     folder_name = f'{date_part}_{time_part}'
+    session_dir = base_dir / folder_name
 
-    # Add seconds for uniqueness if needed
-    unique_id = now.strftime('%S')
-
-    # Create directory path
-    output_dir = base_dir / folder_name
-
-    # Handle duplicate directory names by adding the seconds as a suffix if needed
-    if output_dir.exists():
-        output_dir = base_dir / f'{folder_name}_{unique_id}'
+    if session_dir.exists():
+        unique_id = now.strftime('%S')
+        session_dir = base_dir / f'{folder_name}_{unique_id}'
 
     try:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        logger.debug(f'Created output directory: {output_dir.resolve()}')
+        session_dir.mkdir(parents=True, exist_ok=True)
+        logger.debug(f'Created session directory: {session_dir.resolve()}')
     except OSError:
-        logger.critical(f'Failed to create output directory {output_dir}')
+        logger.critical(f'Failed to create session directory {session_dir}')
         raise
 
-    return output_dir
+    return session_dir
 
 
-def generate_output_path(output_dir: Path, role: str, context: str) -> Path:
-    """Generates the full path for an output recording file."""
+def create_role_dirs(session_dir: Path, roles: list[str]) -> dict[str, Path]:
+    """Creates subdirectories for each role under the session directory."""
+    role_dirs = {}
+    for role in roles:
+        role_dir = session_dir / role
+        role_dir.mkdir(exist_ok=True)
+        logger.debug(f'Created role directory: {role_dir.resolve()}')
+        role_dirs[role] = role_dir
+    return role_dirs
+
+
+def generate_output_path(role_dirs: dict[str, Path], role: str, context: str) -> Path:
+    """Generates the full path for an output recording file, organized in the role subdirectory."""
     filename = FILENAME_TEMPLATE.format(role=role, context=context)
-    return output_dir / filename
+    return role_dirs[role] / filename
 
 
 if __name__ == '__main__':
